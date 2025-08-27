@@ -1,47 +1,47 @@
 const express = require("express");
 const multer = require("multer");
 const dotenv = require("dotenv");
-const path = require("path");
 const cors = require("cors");
 const swaggerUi = require("swagger-ui-express");
 const swaggerJsdoc = require("swagger-jsdoc");
 
-const azureBlobService = require("./upload/azureBlobService");
+const azure = require("./upload/azureBlobService");
 
 dotenv.config();
 const app = express();
-const port = 3000;
+const PORT = process.env.PORT || 3000;
 
-app.use(cors()); // Enable CORS for Swagger testing
+// CORS
+app.use(
+  cors({
+    origin: ["http://localhost:3000", "http://localhost:5173"],
+    credentials: true,
+  })
+);
 app.use(express.json());
 
-// Multer setup
-const upload = multer({ dest: "uploads/" }); // temp storage
+// Multer: memory storage (direct stream to Azure)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+});
 
-// Swagger setup
-const swaggerOptions = {
+// Swagger (OpenAPI 3)
+const swaggerSpec = swaggerJsdoc({
   definition: {
     openapi: "3.0.0",
-    info: {
-      title: "File Management API",
-      version: "1.0.0",
-      description: "API for managing files with Azure Blob Storage",
-    },
-    servers: [{ url: "http://localhost:3000" }],
+    info: { title: "File Management API", version: "1.0.0" },
+    servers: [{ url: `http://localhost:${PORT}` }],
   },
   apis: ["./index.js"],
-};
-
-const swaggerSpec = swaggerJsdoc(swaggerOptions);
+});
 app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 
 /**
  * @swagger
- * /upload:
+ * /files:
  *   post:
  *     summary: Upload a file
- *     consumes:
- *       - multipart/form-data
  *     requestBody:
  *       required: true
  *       content:
@@ -53,15 +53,16 @@ app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
  *                 type: string
  *                 format: binary
  *     responses:
- *       200:
+ *       201:
  *         description: File uploaded
  */
-app.post("/upload", upload.single("file"), async (req, res) => {
+app.post("/files", upload.single("file"), async (req, res, next) => {
   try {
-    const filename = await azureBlobService.uploadFile(req.file);
-    res.status(200).json({ message: "File uploaded", filename });
+    if (!req.file) return res.status(400).json({ message: "No file provided" });
+    const stored = await azure.uploadFile(req.file); // { name, size, contentType }
+    res.status(201).json({ message: "File uploaded", file: stored });
   } catch (err) {
-    res.status(500).json({ message: "Upload failed", error: err.message });
+    next(err);
   }
 });
 
@@ -72,16 +73,14 @@ app.post("/upload", upload.single("file"), async (req, res) => {
  *     summary: List files
  *     responses:
  *       200:
- *         description: A list of files
+ *         description: List of files
  */
-app.get("/files", async (req, res) => {
+app.get("/files", async (_req, res, next) => {
   try {
-    const files = await azureBlobService.listFiles();
+    const files = await azure.listFiles();
     res.status(200).json(files);
   } catch (err) {
-    res
-      .status(500)
-      .json({ message: "Failed to list files", error: err.message });
+    next(err);
   }
 });
 
@@ -96,16 +95,17 @@ app.get("/files", async (req, res) => {
  *         required: true
  *         schema:
  *           type: string
- *         description: File name to download
  *     responses:
  *       200:
- *         description: PDF File download
+ *         description: File stream
+ *       404:
+ *         description: Not found
  */
-app.get("/files/:filename", async (req, res) => {
+app.get("/files/:filename", async (req, res, next) => {
   try {
-    await azureBlobService.streamFile(req.params.filename, res);
+    await azure.streamFile(req.params.filename, res);
   } catch (err) {
-    res.status(500).json({ message: "Download failed", error: err.message });
+    next(err);
   }
 });
 
@@ -120,20 +120,27 @@ app.get("/files/:filename", async (req, res) => {
  *         required: true
  *         schema:
  *           type: string
- *         description: File name to delete
  *     responses:
  *       200:
  *         description: File deleted
+ *       404:
+ *         description: Not found
  */
-app.delete("/files/:filename", async (req, res) => {
+app.delete("/files/:filename", async (req, res, next) => {
   try {
-    await azureBlobService.deleteFile(req.params.filename);
+    await azure.deleteFile(req.params.filename);
     res.status(200).json({ message: "File deleted" });
   } catch (err) {
-    res.status(500).json({ message: "Deletion failed", error: err.message });
+    next(err);
   }
 });
 
-app.listen(port, () => {
-  console.log(`🚀 Server running at http://localhost:${port}`);
+// Central error handler
+app.use((err, _req, res, _next) => {
+  const code = err.message === "File not found" ? 404 : 500;
+  res.status(code).json({ message: err.message || "Server error" });
 });
+
+app.listen(PORT, () =>
+  console.log(`Server running at http://localhost:${PORT}`)
+);

@@ -2,61 +2,95 @@ const {
   BlobServiceClient,
   StorageSharedKeyCredential,
 } = require("@azure/storage-blob");
-const fs = require("fs");
-const path = require("path");
 require("dotenv").config();
 
 const accountName = process.env.AZURE_STORAGE_ACCOUNT_NAME;
 const accountKey = process.env.AZURE_STORAGE_ACCOUNT_KEY;
-const containerName = process.env.AZURE_STORAGE_CONTAINER_NAME;
-const sharedKeyCredential = new StorageSharedKeyCredential(
-  accountName,
-  accountKey
-);
-const blobServiceClient = new BlobServiceClient(
+const container = process.env.AZURE_STORAGE_CONTAINER_NAME;
+
+if (!accountName || !accountKey || !container) {
+  throw new Error(
+    "Missing Azure storage env vars: AZURE_STORAGE_ACCOUNT_NAME/KEY/CONTAINER_NAME"
+  );
+}
+
+const creds = new StorageSharedKeyCredential(accountName, accountKey);
+const svc = new BlobServiceClient(
   `https://${accountName}.blob.core.windows.net`,
-  sharedKeyCredential
+  creds
 );
-const containerClient = blobServiceClient.getContainerClient(containerName);
+const containerClient = svc.getContainerClient(container);
+
+async function ensureContainer() {
+  await containerClient.createIfNotExists();
+}
+
+function safeName(original) {
+  const ts = Date.now();
+  const base = String(original).replace(/[^a-zA-Z0-9._-]/g, "_");
+  return `${ts}-${base}`;
+}
+
 async function uploadFile(file) {
-  const blobName = file.originalname; // preserve original name
-  const blockBlobClient = containerClient.getBlockBlobClient(blobName);
-  await blockBlobClient.uploadFile(file.path);
-  return blobName; // Return name for download
+  await ensureContainer();
+  const blobName = safeName(file.originalname);
+  const block = containerClient.getBlockBlobClient(blobName);
+
+  await block.uploadData(file.buffer, {
+    blobHTTPHeaders: {
+      blobContentType: file.mimetype || "application/octet-stream",
+    },
+    metadata: { originalname: file.originalname },
+  });
+
+  return {
+    name: blobName,
+    size: file.size,
+    contentType: file.mimetype || "application/octet-stream",
+  };
 }
+
 async function listFiles() {
-  let files = [];
-  for await (const blob of containerClient.listBlobsFlat()) {
-    files.push(blob.name);
+  await ensureContainer();
+  const out = [];
+  for await (const b of containerClient.listBlobsFlat({
+    includeMetadata: true,
+  })) {
+    out.push({
+      name: b.name,
+      size: b.properties.contentLength || null,
+      contentType: b.properties.contentType || null,
+      createdOn: b.properties.createdOn || null,
+    });
   }
-  return files;
+  return out;
 }
+
 async function streamFile(filename, res) {
-  const blobClient = containerClient.getBlobClient(filename);
-  if (!(await blobClient.exists())) {
-    throw new Error("File not found");
-  }
+  await ensureContainer();
+  const blob = containerClient.getBlobClient(filename);
+  if (!(await blob.exists())) throw new Error("File not found");
 
-  const downloadResponse = await blobClient.download();
+  const dl = await blob.download();
+  const ct =
+    dl.contentType ||
+    dl.headers?.["content-type"] ||
+    "application/octet-stream";
 
-  // Set headers to download
-  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Type", ct);
   res.setHeader(
     "Content-Disposition",
     `attachment; filename="${encodeURIComponent(filename)}"`
   );
 
-  // Pipe stream
-  downloadResponse.readableStreamBody.pipe(res);
-}
-async function deleteFile(filename) {
-  const blobClient = containerClient.getBlobClient(filename);
-  await blobClient.delete();
+  dl.readableStreamBody.pipe(res);
 }
 
-module.exports = {
-  uploadFile,
-  listFiles,
-  streamFile,
-  deleteFile,
-};
+async function deleteFile(filename) {
+  await ensureContainer();
+  const blob = containerClient.getBlobClient(filename);
+  if (!(await blob.exists())) throw new Error("File not found");
+  await blob.delete();
+}
+
+module.exports = { uploadFile, listFiles, streamFile, deleteFile };
