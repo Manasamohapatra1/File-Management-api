@@ -1,17 +1,19 @@
 const express = require("express");
 const multer = require("multer");
-const dotenv = require("dotenv");
 const cors = require("cors");
 const swaggerUi = require("swagger-ui-express");
 const swaggerJsdoc = require("swagger-jsdoc");
+require("dotenv").config();
 
 const azure = require("./upload/azureBlobService");
 
-dotenv.config();
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 
-// CORS
+// Basic health check (Railway needs a fast 200)
+app.get("/", (_req, res) => res.status(200).send("OK"));
+
+// CORS + JSON
 app.use(
   cors({
     origin: ["http://localhost:3000", "http://localhost:5173"],
@@ -20,10 +22,10 @@ app.use(
 );
 app.use(express.json());
 
-// Multer: memory storage (direct stream to Azure)
+// Multer (memory → direct to Azure)
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20 MB
 });
 
 // Swagger (OpenAPI 3)
@@ -59,8 +61,8 @@ app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.post("/files", upload.single("file"), async (req, res, next) => {
   try {
     if (!req.file) return res.status(400).json({ message: "No file provided" });
-    const stored = await azure.uploadFile(req.file); // { name, size, contentType }
-    res.status(201).json({ message: "File uploaded", file: stored });
+    const saved = await azure.uploadFile(req.file);
+    res.status(201).json({ message: "File uploaded", file: saved });
   } catch (err) {
     next(err);
   }
@@ -77,8 +79,7 @@ app.post("/files", upload.single("file"), async (req, res, next) => {
  */
 app.get("/files", async (_req, res, next) => {
   try {
-    const files = await azure.listFiles();
-    res.status(200).json(files);
+    res.status(200).json(await azure.listFiles());
   } catch (err) {
     next(err);
   }
@@ -137,10 +138,9 @@ app.delete("/files/:filename", async (req, res, next) => {
 
 // Central error handler
 app.use((err, _req, res, _next) => {
+  console.error(err);
   const code = err.message === "File not found" ? 404 : 500;
   res.status(code).json({ message: err.message || "Server error" });
 });
 
-app.listen(PORT, () =>
-  console.log(`Server running at http://localhost:${PORT}`)
-);
+app.listen(PORT, "0.0.0.0", () => console.log(`HTTP on ${PORT}`));

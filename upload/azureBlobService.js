@@ -10,7 +10,7 @@ const container = process.env.AZURE_STORAGE_CONTAINER_NAME;
 
 if (!accountName || !accountKey || !container) {
   throw new Error(
-    "Missing Azure storage env vars: AZURE_STORAGE_ACCOUNT_NAME/KEY/CONTAINER_NAME"
+    "Missing env vars: AZURE_STORAGE_ACCOUNT_NAME / AZURE_STORAGE_ACCOUNT_KEY / AZURE_STORAGE_CONTAINER_NAME"
   );
 }
 
@@ -22,18 +22,18 @@ const svc = new BlobServiceClient(
 const containerClient = svc.getContainerClient(container);
 
 async function ensureContainer() {
+  // default access is private; do not pass { access: "private" }
   await containerClient.createIfNotExists();
 }
 
-function safeName(original) {
-  const ts = Date.now();
-  const base = String(original).replace(/[^a-zA-Z0-9._-]/g, "_");
-  return `${ts}-${base}`;
+function keepOriginalName(name) {
+  // sanitize only; keep original to satisfy your request
+  return String(name).replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
 async function uploadFile(file) {
   await ensureContainer();
-  const blobName = safeName(file.originalname);
+  const blobName = keepOriginalName(file.originalname); // may overwrite same-name files
   const block = containerClient.getBlockBlobClient(blobName);
 
   await block.uploadData(file.buffer, {
@@ -58,9 +58,9 @@ async function listFiles() {
   })) {
     out.push({
       name: b.name,
-      size: b.properties.contentLength || null,
-      contentType: b.properties.contentType || null,
-      createdOn: b.properties.createdOn || null,
+      size: b.properties.contentLength ?? null,
+      contentType: b.properties.contentType ?? null,
+      createdOn: b.properties.createdOn ?? null,
     });
   }
   return out;
@@ -76,13 +76,11 @@ async function streamFile(filename, res) {
     dl.contentType ||
     dl.headers?.["content-type"] ||
     "application/octet-stream";
-
   res.setHeader("Content-Type", ct);
   res.setHeader(
     "Content-Disposition",
     `attachment; filename="${encodeURIComponent(filename)}"`
   );
-
   dl.readableStreamBody.pipe(res);
 }
 
